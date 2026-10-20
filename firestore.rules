@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Helper Functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isCurrentUser(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    
+    function isBootstrapAdmin() {
+      return isSignedIn() && request.auth.token.email == 's6710380102@pkru.ac.th';
+    }
+    
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    
+    function isAdmin() {
+      return isSignedIn() && (isBootstrapAdmin() || (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRole() == 'admin'));
+    }
+    
+    function isModerator() {
+      return isSignedIn() && (isAdmin() || (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRole() == 'moderator'));
+    }
+    
+    function isNotSuspended() {
+      return isSignedIn() && (!exists(/databases/$(database)/documents/users/$(request.auth.uid)) || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isSuspended != true);
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      // Anyone signed in can read user public names; admin can read all
+      allow read: if isSignedIn();
+      
+      // User can create their own profile
+      allow create: if isCurrentUser(userId) && (
+        isBootstrapAdmin() || 
+        (request.resource.data.role == 'member' && request.resource.data.isSuspended == false)
+      );
+      
+      // User can update their own non-sensitive profile fields; Admin can update role & suspension
+      allow update: if (
+        (isCurrentUser(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'isSuspended'])) ||
+        isAdmin()
+      );
+      
+      allow delete: if isAdmin();
+    }
+
+    // Resources Collection (คลังความรู้)
+    match /resources/{resourceId} {
+      // Public can read non-hidden resources; Author and Admin/Moderator can read all
+      allow read: if (resource.data.isHiddenByAdmin != true) || 
+                     (isSignedIn() && (resource.data.authorId == request.auth.uid || isModerator()));
+                     
+      // Active signed-in members can create knowledge items
+      allow create: if isSignedIn() && isNotSuspended() && request.resource.data.authorId == request.auth.uid;
+      
+      // Author can update their content (except admin flags), Moderator/Admin can update all (hide, status)
+      allow update: if (isSignedIn() && isNotSuspended() && resource.data.authorId == request.auth.uid && 
+                        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isHiddenByAdmin'])) ||
+                       isModerator();
+                       
+      // Author can delete their own resource, Admin can delete any
+      allow delete: if (isSignedIn() && resource.data.authorId == request.auth.uid) || isAdmin();
+    }
+
+    // Favorites Collection
+    match /favorites/{favoriteId} {
+      // Users can list and get their own favorites; Admin can manage
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // Reports Collection
+    match /reports/{reportId} {
+      // Reporter can view their own reports; Moderator/Admin can view all
+      allow read: if isSignedIn() && (resource.data.reporterId == request.auth.uid || isModerator());
+      // Any signed in user can submit a report
+      allow create: if isSignedIn() && request.resource.data.reporterId == request.auth.uid;
+      // Moderator and Admin can update (e.g. resolve) or delete
+      allow update, delete: if isModerator();
+    }
+
+    // Moderation Logs
+    match /moderationLogs/{logId} {
+      allow read: if isModerator();
+      allow create: if isModerator() && request.resource.data.moderatorId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // Site Settings (General configs, dynamic categories, announcements)
+    match /settings/{settingId} {
+      // Everyone can read site settings (site title, announcement, categories)
+      allow read: if true;
+      // Only Admin can update settings
+      allow create, update, delete: if isAdmin();
+    }
+  }
+}
